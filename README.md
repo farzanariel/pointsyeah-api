@@ -38,12 +38,29 @@ npm install
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 
-# 3. (Optional, recommended) Add your pointsyeah idToken
+# 3. (Optional, recommended) Add your pointsyeah idToken — see below
 cp .env.example .env
-# then edit .env — see comments inside for how to grab the token from your browser
 ```
 
 Without a token the pointsyeah API returns synthetic teaser data; with one you get real award availability.
+
+### Getting your `POINTSYEAH_ID_TOKEN`
+
+The token is a short-lived Firebase Auth JWT that pointsyeah's frontend sends on every authenticated request. There's no public way to mint one — you have to grab it out of your own browser session.
+
+1. Sign up / log in at [pointsyeah.com](https://www.pointsyeah.com) (a free account is enough).
+2. With the site open, **open DevTools** (`Cmd+Opt+I` on Mac, `F12` on Windows/Linux) and go to the **Network** tab.
+3. Run any flight search on the site. You should see requests fly to `api2.pointsyeah.com` (e.g. `create_task`, `fetch_result`).
+4. Click one of those requests, scroll to **Request Headers**, and find the `authorization:` header. The value is your idToken — a long string starting with `eyJ…` (three dot-separated chunks).
+5. Copy *just the token value* (not the word `authorization:` or any `Bearer` prefix) into `.env`:
+
+   ```
+   POINTSYEAH_ID_TOKEN=eyJhbGciOiJSUzI1NiIs...long...string...
+   ```
+
+6. Run `npm run search -- ...`. On the first line of output you should see `Auth: logged in (parseKeySection=…, expired=false)`. If it says `expired=true`, the token has aged out — repeat the steps above to grab a fresh one.
+
+**Heads up:** these tokens typically expire about an hour after you grab them. The CLI prints a warning when that happens. The token is sensitive — treat it like a password, and never commit your `.env` (it's already in `.gitignore`).
 
 ## Usage
 
