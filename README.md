@@ -31,36 +31,60 @@ AA        AA513           3:05p-11:18p    LAX-PHL         5h13   Business       
 Requires **Node 22+** (for `process.loadEnvFile` and the native `tsx` ESM loader) and **Python 3.10+**.
 
 ```bash
-# 1. Install Node deps
+# 1. Install Node deps (this also installs Playwright, used by auth-setup)
 npm install
+npx playwright install chromium
 
 # 2. Set up Python venv for the cash-price side
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 
-# 3. (Optional, recommended) Add your pointsyeah idToken — see below
-cp .env.example .env
+# 3. Sign in to pointsyeah once — see "Authentication" below
+npm run auth-setup
 ```
 
-Without a token the pointsyeah API returns synthetic teaser data; with one you get real award availability.
+Without authentication the pointsyeah API returns synthetic teaser data; once signed in you get real award availability.
 
-### Getting your `POINTSYEAH_ID_TOKEN`
+## Authentication
 
-The token is a short-lived Firebase Auth JWT that pointsyeah's frontend sends on every authenticated request. There's no public way to mint one — you have to grab it out of your own browser session.
+pointsyeah authenticates every API request with a short-lived (~1 hour) Firebase ID token. This CLI takes a browser-automation approach to handle that without any manual copy-paste:
 
-1. Sign up / log in at [pointsyeah.com](https://www.pointsyeah.com) (a free account is enough).
-2. With the site open, **open DevTools** (`Cmd+Opt+I` on Mac, `F12` on Windows/Linux) and go to the **Network** tab.
-3. Run any flight search on the site. You should see requests fly to `api2.pointsyeah.com` (e.g. `create_task`, `fetch_result`).
-4. Click one of those requests, scroll to **Request Headers**, and find the `authorization:` header. The value is your idToken — a long string starting with `eyJ…` (three dot-separated chunks).
-5. Copy *just the token value* (not the word `authorization:` or any `Bearer` prefix) into `.env`:
+### One-time setup
 
-   ```
-   POINTSYEAH_ID_TOKEN=eyJhbGciOiJSUzI1NiIs...long...string...
-   ```
+```bash
+npm run auth-setup
+```
 
-6. Run `npm run search -- ...`. On the first line of output you should see `Auth: logged in (parseKeySection=…, expired=false)`. If it says `expired=true`, the token has aged out — repeat the steps above to grab a fresh one.
+This launches a Chromium window via Playwright. Sign in to [pointsyeah.com](https://www.pointsyeah.com) however you normally do (Google sign-in works). Once the script captures an authenticated request to `api2.pointsyeah.com` it saves your token to `~/.cache/pointsyeah/idToken` (mode `0600`) and your browser profile to `./.auth-state/`. The window closes automatically.
 
-**Heads up:** these tokens typically expire about an hour after you grab them. The CLI prints a warning when that happens. The token is sensitive — treat it like a password, and never commit your `.env` (it's already in `.gitignore`).
+> **Tip:** if the script just sits there after you finish signing in, run a flight search on the page — that's what triggers the API call it's listening for.
+
+### Auto-refresh on expiry
+
+After the one-time setup, **you don't have to do anything else**. Before each search the CLI:
+
+1. Reads the cached token from `~/.cache/pointsyeah/idToken`.
+2. Decodes the JWT's `exp` claim. If the token is still valid (>5 minutes from expiry), it's used as-is.
+3. If it's expired or about to expire, a **headless** Playwright session loads the saved profile, hits a search URL, captures the fresh authenticated request, and writes the new token to disk. This typically takes a few seconds and only happens once per session.
+
+If your saved browser profile gets logged out (cookies expired, password reset, etc.), you'll see `Auth not set up. Run: npm run auth-setup` — just re-run the one-time setup and you're back.
+
+### Manual refresh
+
+If you want to force a refresh without waiting for the next search:
+
+```bash
+npm run auth-refresh
+```
+
+### Files written to disk
+
+| Path | What | Why it's gitignored |
+|---|---|---|
+| `~/.cache/pointsyeah/idToken` | the active JWT (mode 0600) | sensitive — outside the repo entirely |
+| `./.auth-state/` | Playwright's persistent Chromium profile (cookies, localStorage) | sensitive — keeps you logged in |
+
+Both are already in `.gitignore`. Treat them like a password.
 
 ## Usage
 
@@ -93,8 +117,11 @@ The pointsyeah web app encrypts its search payloads with AES-256-CBC before send
 
 The search itself is a two-step long-poll: `POST /flight/search/create_task` returns a task id, then `POST /flight/search/fetch_result` is called repeatedly until status flips to `done`. Each poll merges any new program results into a map keyed by `program|date|origin|dest` so refreshes don't duplicate.
 
+### `src/auth.ts` + `scripts/auth-setup.ts` + `scripts/auth-refresh.ts`
+The auth pipeline. `auth-setup` is the interactive one-time browser sign-in that captures the first token and persists a Chromium profile. `auth-refresh` is the headless re-run that uses that profile to mint a fresh token whenever the cached one is within 5 minutes of expiry. `src/auth.ts`'s `ensureFreshIdToken()` is what the CLI calls before every search — it transparently picks between the cached token and a refresh.
+
 ### `src/test-search.ts`
-Argument parsing, filtering, sorting, and table rendering. Fans out one `cash_quote.py` subprocess per requested cabin in parallel with the points polling, so cash and award data arrive concurrently. As points results stream in, each frame redraws the table in place (TTY only) so you watch programs populate live.
+Argument parsing, filtering, sorting, and table rendering. Calls `ensureFreshIdToken()` first, then fans out one `cash_quote.py` subprocess per requested cabin in parallel with the points polling, so cash and award data arrive concurrently. As points results stream in, each frame redraws the table in place (TTY only) so you watch programs populate live. The table layout is width-aware: it drops less-essential columns and shrinks shrinkable ones to fit the current terminal width.
 
 **Cash matching.** For each award row, the CLI looks for a cash trip in the same cabin that:
 1. departs from the same origin airport (matters for multi-segment awards), and
@@ -112,13 +139,23 @@ Thin wrapper over `fast-flights` that prints a JSON list of trips to stdout — 
 ```
 src/
   pointsyeah.ts        # the encrypted-API client
+  auth.ts              # picks between cached token and refresh
   test-search.ts       # the CLI
   dump-response.ts     # debug helper: dumps raw poll snapshots to /tmp
 scripts/
+  auth-setup.ts        # interactive Playwright sign-in (one-time)
+  auth-refresh.ts      # headless token refresh (auto + manual)
   cash_quote.py        # Google Flights subprocess
-.env.example           # template for the pointsyeah idToken
 requirements.txt       # Python deps (fast-flights from GitHub)
-package.json           # Node deps (just tsx + typescript)
+package.json           # Node deps: tsx, typescript, playwright + stealth
+```
+
+Cache + state (gitignored, lives outside the repo or in `.auth-state/`):
+
+```
+~/.cache/pointsyeah/idToken   # current JWT, mode 0600
+./.auth-state/                # Playwright persistent Chromium profile
+./.cache/                     # Python-side cache for cash_quote.py
 ```
 
 ## License

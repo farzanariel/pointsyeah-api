@@ -119,6 +119,8 @@ Rows with CPP ≥ ${CPP_HIGHLIGHT}¢ are highlighted as good-value awards.
 Options:
   -c, --cabin <c>       economy | premium | business | first   (server-side)
                         repeatable; default: all
+      --flex <n>        search +N days from <date> (max ~7).
+                        adds a DATE column. default: 0 (single day)
       --nonstop         shorthand for --max-stops 0
       --max-stops <n>   0, 1, 2…
       --max-miles <n>   e.g. 30000
@@ -142,6 +144,7 @@ try {
   parsed = parseArgs({
     options: {
       cabin: { type: "string", multiple: true, short: "c" },
+      flex: { type: "string" },
       nonstop: { type: "boolean" },
       "max-stops": { type: "string" },
       "max-miles": { type: "string" },
@@ -218,6 +221,18 @@ function normalizeCabin(s: string): Cabin {
 
 const cabins = values.cabin?.length ? [...new Set(values.cabin.map(normalizeCabin))] : undefined;
 
+// Upper bound is what the PointsYeah API itself accepts; their UI exposes 8 to
+// paid users. Clamp at 60 just to keep us from accidentally firing 240+ cash
+// queries (4 cabins × 60 days). Whether the API actually returns data past day
+// 8 is what `--flex` lets you probe.
+const flexDays = values.flex !== undefined ? Math.max(0, Math.min(60, Number(values.flex))) : 0;
+function addDays(iso: string, n: number): string {
+  const d = new Date(iso + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+const departDateTo = flexDays > 0 ? addDays(date!, flexDays) : undefined;
+
 const maxStops = values.nonstop
   ? 0
   : values["max-stops"] !== undefined
@@ -262,7 +277,9 @@ function passesFilters(r: Row): boolean {
   return true;
 }
 
-const tiebreakStops = (a: Row, b: Row) => stops(a) - stops(b);
+// Tiebreakers: nonstops above connections, then earlier dates above later dates.
+const tiebreakStops = (a: Row, b: Row) =>
+  stops(a) - stops(b) || a.segments[0].dt.localeCompare(b.segments[0].dt);
 const cppOf = (r: Row): number | null => {
   const cash = matchCashForRow(r);
   if (!cash || r.payment.miles <= 0) return null;
@@ -295,10 +312,16 @@ const limit =
 
 const useCache = !values["no-cache"];
 const cabinsForCash = cabins ?? ALL_CABINS;
-const cashByCabin = new Map<Cabin, CashTrip[]>();
+// Keyed by `${YYYY-MM-DD}|${Cabin}` so multi-day searches can match each row's date.
+const cashByDateCabin = new Map<string, CashTrip[]>();
+const cashKey = (d: string, c: Cabin) => `${d}|${c}`;
+
+const dateRange: string[] = [];
+for (let i = 0; i <= flexDays; i++) dateRange.push(addDays(date!, i));
 
 function matchCashForRow(r: Row): CashTrip | undefined {
-  const trips = cashByCabin.get(r.payment.cabin as Cabin);
+  const rowDate = r.segments[0].dt.slice(0, 10);
+  const trips = cashByDateCabin.get(cashKey(rowDate, r.payment.cabin as Cabin));
   if (!trips?.length) return undefined;
   const seg0 = r.segments[0];
   const rowDep = new Date(seg0.dt).getTime();
@@ -355,7 +378,16 @@ type ColSpec = {
   get: (r: Row) => string;
 };
 
+const SHORT_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const formatShortDate = (iso: string) => {
+  const [, mm, dd] = iso.slice(0, 10).split("-");
+  return `${SHORT_MONTHS[Number(mm) - 1]} ${Number(dd)}`;
+};
+
 const COL_SPECS: ColSpec[] = [
+  ...(flexDays > 0
+    ? [{ key: "date" as const, header: "DATE", align: "L" as const, base: 6, min: 6, priority: Infinity, get: (r: Row) => formatShortDate(r.segments[0].dt) }]
+    : []),
   { key: "flies",    header: "FLIES",         align: "L", base: 8,  min: 8,  priority: Infinity, get: (r) => operatedBy(r) },
   { key: "flight",   header: "FLIGHT#",       align: "L", base: 14, min: 8,  priority: Infinity, get: (r) => flightNums(r) },
   { key: "times",    header: "TIMES",         align: "L", base: 14, min: 14, priority: 5,        get: (r) => times(r) },
@@ -452,12 +484,18 @@ function statusLine(): string {
 }
 
 function cashBaselineLine(): string {
-  const parts = [...cashByCabin.entries()]
-    .filter(([, trips]) => trips.length)
-    .map(
-      ([c, trips]) =>
-        `${c.toLowerCase().split(" ")[0]} from $${Math.min(...trips.map((t) => t.price))}`,
-    );
+  // Lowest cash seen for each cabin across the entire date range.
+  const minByCabin = new Map<Cabin, number>();
+  for (const [key, trips] of cashByDateCabin) {
+    const cabin = key.split("|")[1] as Cabin;
+    for (const t of trips) {
+      const cur = minByCabin.get(cabin);
+      if (cur === undefined || t.price < cur) minByCabin.set(cabin, t.price);
+    }
+  }
+  const parts = [...minByCabin.entries()].map(
+    ([c, price]) => `${c.toLowerCase().split(" ")[0]} from $${price}`,
+  );
   return parts.length ? `${ANSI_DIM}cash baseline: ${parts.join(", ")}${ANSI_RESET}` : "";
 }
 
@@ -518,23 +556,27 @@ if (!values.json) {
   }
   const [y, m, d] = date.split("-");
   console.log(
-    `Searching ${dep} → ${arr} on ${m}/${d}/${y}${cabins ? ` (cabins: ${cabins.join(", ")})` : ""}…`,
+    `Searching ${dep} → ${arr} on ${m}/${d}/${y}${flexDays > 0 ? ` (+${flexDays} days)` : ""}${cabins ? ` (cabins: ${cabins.join(", ")})` : ""}…`,
   );
   console.log("");
 }
 
-// Cash queries in parallel
+// Cash queries in parallel — one per (date × cabin). Disk cache makes repeat
+// runs cheap. Each unique cabin gets queried at most once per date.
 const cashPromise = Promise.all(
-  cabinsForCash.map(async (c) => {
-    cashByCabin.set(c, await fetchCashQuotes(dep, arr, date, c, useCache));
-  }),
+  dateRange.flatMap((d) =>
+    cabinsForCash.map(async (c) => {
+      const trips = await fetchCashQuotes(dep, arr, d, c, useCache);
+      cashByDateCabin.set(cashKey(d, c), trips);
+    }),
+  ),
 ).then(() => {
   cashReady = true;
   render();
 });
 
 const programs = await search(
-  { departure: dep, arrival: arr, departDate: date, cabins },
+  { departure: dep, arrival: arr, departDate: date, departDateTo, cabins },
   {
     pollIntervalMs: 50,
     timeoutMs: 60_000,
