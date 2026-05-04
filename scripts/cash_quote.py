@@ -84,6 +84,9 @@ def _run_query(
     `cabin` must already be in fast-flights format (lowercase-hyphen).
     `airlines`, if given, is a list of IATA carrier codes (e.g. ["B6"]).
     Raises on failure; callers decide how to handle.
+
+    Honors POINTSYEAH_PROXY env var (http://user:pass@host:port) — needed
+    on VPS/datacenter hosts where Google Flights serves a different page.
     """
     _silence_fast_flights_debug_print()
     from fast_flights import (
@@ -106,11 +109,12 @@ def _run_query(
         trip="one-way",
         passengers=Passengers(adults=adults),
     )
+    proxy = os.environ.get("POINTSYEAH_PROXY") or None
     # fast_flights' parser.py has a stray debug print(data); redirect
     # stdout to /dev/null while we call into it so our only stdout output
     # is the JSON we emit at the end.
     with contextlib.redirect_stdout(io.StringIO()):
-        res = get_flights(query)
+        res = get_flights(query, proxy=proxy)
 
     trips: list[dict[str, Any]] = []
     for trip in res:
