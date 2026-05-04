@@ -11,20 +11,38 @@ A terminal flight search that prints **points/miles awards side-by-side with cas
 
 ## Example
 
+After a one-time `npm run auth-setup`, every search refreshes its token automatically:
+
 ```
 $ npm run search -- LAX PHL 06/09/2026 -c business --nonstop -s cpp -n 5
+
+Auth: logged in (parseKeySection=a3f9c1d2, expired=false)
+Searching LAX → PHL on 06/09/2026 (cabins: Business)…
 
 t=4.2s   points ✓ (12 programs / 38 routes)   cash ✓
 cash baseline: business from $612
 
-FLIES     FLIGHT#         TIMES           ROUTE           DUR    CABIN            MILES     +TAX     CASH    CPP  BOOK WITH                   TRANSFER FROM
-----------------------------------------------------------------------------------------------------------------------------------------------------------
-AA        AA1132          10:36a-6:54p    LAX-PHL         5h18   Business        43,600    $5.60    $612  1.39¢  Qantas Frequent Flyer       Capital One, Amex, Citi
-AA        AA513           3:05p-11:18p    LAX-PHL         5h13   Business        43,600    $5.60    $658  1.50¢  Qantas Frequent Flyer       Capital One, Amex, Citi
+FLIES     FLIGHT#         TIMES           ROUTE           DUR    CABIN            MILES     +TAX     CASH     CPP  BOOK WITH                   TRANSFER FROM
+-----------------------------------------------------------------------------------------------------------------------------------------------------------
+AA        AA1132          10:36a-6:54p    LAX-PHL         5h18   Business        43,600    $5.60    $612   1.39¢  Qantas Frequent Flyer       Capital One, Amex, Citi
+AA        AA513           3:05p-11:18p    LAX-PHL         5h13   Business        43,600    $5.60    $658   1.50¢  Qantas Frequent Flyer       Capital One, Amex, Citi
 …
+
+Showing 5 of 38 returned (12 programs, sorted by cpp).
 ```
 
-`CPP` is cents per point — higher is better. The bold-green rows in your terminal are the ≥1.5¢ "good redemption" picks.
+`CPP` is cents per point — higher is better. The bold-green rows in your terminal are the ≥1.5¢ "good redemption" picks. The status line above the table updates live as both sides stream in (`points …` → `points ✓`).
+
+### Narrow terminals
+
+The table reflows to fit. Resize your terminal mid-search and the next streaming frame redraws with fewer/narrower columns. At ~100 cols the lowest-priority columns (ROUTE, CABIN, DUR) drop out first; the `MILES`/`CASH`/`CPP` triple is always kept since it's the whole point of the comparison:
+
+```
+FLIES     FLIGHT#         TIMES            MILES     +TAX     CASH     CPP  BOOK WITH                  TRANSFER FROM
+-------------------------------------------------------------------------------------------------------------------
+AA        AA1132          10:36a-6:54p    43,600    $5.60    $612   1.39¢  Qantas Frequent Flyer       Capital On…
+AA        AA513           3:05p-11:18p    43,600    $5.60    $658   1.50¢  Qantas Frequent Flyer       Capital On…
+```
 
 ## Setup
 
