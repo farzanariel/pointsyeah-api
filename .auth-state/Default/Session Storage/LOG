@@ -1,3 +1,6 @@
-2026/05/04-17:04:11.893 1dd1542 Reusing MANIFEST /Users/farzan/Documents/Projects/pointsyeah/.auth-state/Default/Session Storage/MANIFEST-000001
-2026/05/04-17:04:11.893 1dd1542 Recovering log #3
-2026/05/04-17:04:11.894 1dd1542 Reusing old log /Users/farzan/Documents/Projects/pointsyeah/.auth-state/Default/Session Storage/000003.log 
+2026/05/04-18:49:17.477 1de7288 Reusing MANIFEST /Users/farzan/Documents/Projects/pointsyeah/.auth-state/Default/Session Storage/MANIFEST-000001
+2026/05/04-18:49:17.477 1de7288 Recovering log #4
+2026/05/04-18:49:17.477 1de7288 Reusing old log /Users/farzan/Documents/Projects/pointsyeah/.auth-state/Default/Session Storage/000004.log 
+2026/05/04-18:49:23.866 1de728a Level-0 table #8: started
+2026/05/04-18:49:23.878 1de728a Level-0 table #8: 32276 bytes OK
+2026/05/04-18:49:23.881 1de728a Delete type=0 #4

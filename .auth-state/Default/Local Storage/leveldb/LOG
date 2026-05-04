@@ -1,3 +1,6 @@
-2026/05/04-17:04:10.945 1dd1542 Reusing MANIFEST /Users/farzan/Documents/Projects/pointsyeah/.auth-state/Default/Local Storage/leveldb/MANIFEST-000001
-2026/05/04-17:04:10.965 1dd1542 Recovering log #3
-2026/05/04-17:04:10.966 1dd1542 Reusing old log /Users/farzan/Documents/Projects/pointsyeah/.auth-state/Default/Local Storage/leveldb/000003.log 
+2026/05/04-18:49:16.788 1de7288 Reusing MANIFEST /Users/farzan/Documents/Projects/pointsyeah/.auth-state/Default/Local Storage/leveldb/MANIFEST-000001
+2026/05/04-18:49:16.805 1de7288 Recovering log #3
+2026/05/04-18:49:16.806 1de7288 Reusing old log /Users/farzan/Documents/Projects/pointsyeah/.auth-state/Default/Local Storage/leveldb/000003.log 
+2026/05/04-18:49:28.559 1de728a Level-0 table #5: started
+2026/05/04-18:49:28.569 1de728a Level-0 table #5: 23189 bytes OK
+2026/05/04-18:49:28.574 1de728a Delete type=0 #3
