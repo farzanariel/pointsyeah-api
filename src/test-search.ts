@@ -125,8 +125,9 @@ Options:
                         repeatable; default: all
       --flex <n>        search +N days from <date> (max ~7).
                         adds a DATE column. default: 0 (single day)
-      --nonstop         shorthand for --max-stops 0
-      --max-stops <n>   0, 1, 2…
+      --nonstop         only direct flights (exactly 0 stops)
+      --one-stop        only 1-stop itineraries (exactly 1 stop)
+      --max-stops <n>   include up to N stops (0 = nonstop, 1 = nonstop+1-stop…)
       --max-miles <n>   e.g. 30000
       --max-tax <n>     in USD, e.g. 100
   -b, --bank <b>        amex | chase | citi | bilt | capital-one
@@ -150,6 +151,7 @@ try {
       cabin: { type: "string", multiple: true, short: "c" },
       flex: { type: "string" },
       nonstop: { type: "boolean" },
+      "one-stop": { type: "boolean" },
       "max-stops": { type: "string" },
       "max-miles": { type: "string" },
       "max-tax": { type: "string" },
@@ -237,11 +239,16 @@ function addDays(iso: string, n: number): string {
 }
 const departDateTo = flexDays > 0 ? addDays(date!, flexDays) : undefined;
 
-const maxStops = values.nonstop
+// `--nonstop` and `--one-stop` are exact-match shorthands; `--max-stops N`
+// is a range. They're independent: e.g. `--max-stops 2` paired with
+// `--one-stop` would be redundant (the latter wins), but neither breaks.
+const exactStops: number | undefined = values.nonstop
   ? 0
-  : values["max-stops"] !== undefined
-    ? Number(values["max-stops"])
+  : values["one-stop"]
+    ? 1
     : undefined;
+const maxStops =
+  values["max-stops"] !== undefined ? Number(values["max-stops"]) : undefined;
 const maxMiles = values["max-miles"] !== undefined ? Number(values["max-miles"]) : undefined;
 const maxTax = values["max-tax"] !== undefined ? Number(values["max-tax"]) : undefined;
 
@@ -266,6 +273,7 @@ const operatingCarriers = (r: Row): Set<string> =>
   new Set(r.segments.map((s) => s.flight_number.match(/^[A-Z0-9]{2}/)?.[0] ?? "??"));
 
 function passesFilters(r: Row): boolean {
+  if (exactStops !== undefined && stops(r) !== exactStops) return false;
   if (maxStops !== undefined && stops(r) > maxStops) return false;
   if (maxMiles !== undefined && r.payment.miles > maxMiles) return false;
   if (maxTax !== undefined && r.payment.tax > maxTax) return false;
