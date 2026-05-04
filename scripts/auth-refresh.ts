@@ -22,9 +22,22 @@ export async function refreshIdToken(): Promise<string> {
     throw new Error("Auth not set up. Run: npm run auth-setup");
   }
 
+  // Optional proxy for VPS use — datacenter IPs trigger Google SSO challenges,
+  // residential proxies bypass that. Format: http://user:pass@host:port
+  const proxyUrl = process.env.POINTSYEAH_PROXY?.trim();
+  let proxy: { server: string; username?: string; password?: string } | undefined;
+  if (proxyUrl) {
+    const u = new URL(proxyUrl);
+    proxy = {
+      server: `${u.protocol}//${u.host}`,
+      username: decodeURIComponent(u.username) || undefined,
+      password: decodeURIComponent(u.password) || undefined,
+    };
+  }
+
   const context: BrowserContext = await chromium.launchPersistentContext(
     AUTH_STATE_DIR,
-    { headless: true }
+    { headless: true, proxy }
   );
 
   let token: string | undefined;
