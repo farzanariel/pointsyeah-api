@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "search": "tsx src/test-search.ts",
+    "watch": "tsx src/watch.ts",
     "auth-setup": "tsx scripts/auth-setup.ts",
     "auth-refresh": "tsx scripts/auth-refresh.ts"
   },
