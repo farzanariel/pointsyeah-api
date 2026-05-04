@@ -83,6 +83,16 @@ async function main(): Promise<void> {
   await writeFile(TOKEN_PATH, token, { mode: 0o600 });
   console.log(`✓ Saved fresh token to ~/.cache/pointsyeah/idToken`);
 
+  // Export portable storageState (decrypted cookies). This is what the VPS
+  // uses — the raw .auth-state/ profile has its cookie values encrypted with
+  // the host OS keyring and isn't readable on any other machine.
+  const KEEP = ["www.pointsyeah.com", ".pointsyeah.com", "pointsyeah.com"];
+  const state = await context.storageState();
+  state.cookies = state.cookies.filter((c) => KEEP.includes(c.domain));
+  state.origins = state.origins.filter((o) => o.origin.includes("pointsyeah.com"));
+  await writeFile("./auth.json", JSON.stringify(state, null, 2));
+  console.log(`✓ Wrote portable auth state to ./auth.json (${state.cookies.length} cookies)`);
+
   await context.close();
 }
 

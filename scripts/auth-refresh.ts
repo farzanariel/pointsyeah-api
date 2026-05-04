@@ -1,6 +1,6 @@
 import { chromium } from "playwright-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
-import type { BrowserContext, Request } from "playwright";
+import type { Request } from "playwright";
 import { mkdir, writeFile, access } from "node:fs/promises";
 
 chromium.use(StealthPlugin());
@@ -9,7 +9,7 @@ import { join } from "node:path";
 
 const TOKEN_DIR = join(homedir(), ".cache", "pointsyeah");
 const TOKEN_PATH = join(TOKEN_DIR, "idToken");
-const AUTH_STATE_DIR = "./.auth-state";
+const STORAGE_STATE = "./auth.json";
 const TIMEOUT_MS = 60 * 1000;
 
 const SEARCH_URL =
@@ -17,13 +17,12 @@ const SEARCH_URL =
 
 export async function refreshIdToken(): Promise<string> {
   try {
-    await access(AUTH_STATE_DIR);
+    await access(STORAGE_STATE);
   } catch {
     throw new Error("Auth not set up. Run: npm run auth-setup");
   }
 
-  // Optional proxy for VPS use — datacenter IPs trigger Google SSO challenges,
-  // residential proxies bypass that. Format: http://user:pass@host:port
+  // Optional proxy via POINTSYEAH_PROXY=http://user:pass@host:port
   const proxyUrl = process.env.POINTSYEAH_PROXY?.trim();
   let proxy: { server: string; username?: string; password?: string } | undefined;
   if (proxyUrl) {
@@ -35,10 +34,12 @@ export async function refreshIdToken(): Promise<string> {
     };
   }
 
-  const context: BrowserContext = await chromium.launchPersistentContext(
-    AUTH_STATE_DIR,
-    { headless: true, proxy }
-  );
+  // Use launch + storageState (portable JSON) instead of launchPersistentContext.
+  // The persistent profile encrypts cookie values with the host OS keyring,
+  // so its cookies are unreadable on any other machine. storageState gives
+  // us decrypted, portable cookies.
+  const browser = await chromium.launch({ headless: true, proxy });
+  const context = await browser.newContext({ storageState: STORAGE_STATE });
 
   let token: string | undefined;
   let resolveCaptured!: () => void;
@@ -59,8 +60,7 @@ export async function refreshIdToken(): Promise<string> {
   };
 
   context.on("request", onRequest);
-
-  const page = context.pages()[0] ?? (await context.newPage());
+  const page = await context.newPage();
   page.on("request", onRequest);
 
   try {
@@ -79,8 +79,20 @@ export async function refreshIdToken(): Promise<string> {
     );
 
     await Promise.race([captured, timeout]);
+
+    // Save the (potentially rotated) cookie state so the next refresh has
+    // the latest refreshToken. Cognito sometimes rotates them.
+    try {
+      const fresh = await context.storageState();
+      const KEEP = ["www.pointsyeah.com", ".pointsyeah.com", "pointsyeah.com"];
+      fresh.cookies = fresh.cookies.filter((c) => KEEP.includes(c.domain));
+      fresh.origins = fresh.origins.filter((o) => o.origin.includes("pointsyeah.com"));
+      await writeFile(STORAGE_STATE, JSON.stringify(fresh, null, 2));
+    } catch {
+      // not fatal — token was captured
+    }
   } finally {
-    await context.close();
+    await browser.close();
   }
 
   if (!token) {

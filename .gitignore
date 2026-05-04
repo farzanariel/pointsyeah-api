@@ -17,17 +17,7 @@ flights/
 # Python-side disk cache for cash quotes
 scripts/.cache/
 
-# Playwright auth profile is committed (private repo, agent needs it).
-# But skip the regenerable Chromium caches — they bloat the repo and Chromium
-# rebuilds them on every launch anyway.
-.auth-state/**/Cache/
-.auth-state/**/Code Cache/
-.auth-state/**/GPUCache/
-.auth-state/**/DawnWebGPUCache/
-.auth-state/**/DawnGraphiteCache/
-.auth-state/**/component_crx_cache/
-.auth-state/**/extensions_crx_cache/
-.auth-state/GraphiteDawnCache/
-.auth-state/ShaderCache/
-.auth-state/GrShaderCache/
-.auth-state/**/optimization_guide_*
+# Playwright persistent profile — Chromium encrypts cookie values with the
+# host OS keyring, so this profile is unreadable on any other machine. Use
+# auth.json (committed) for cross-machine portability instead.
+.auth-state/
