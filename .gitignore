@@ -1,0 +1,14 @@
+node_modules
+.venv
+*.har
+.DS_Store
+.env*
+!.env.example
+__pycache__
+*.pyc
+
+# Third-party clone (AWeirdDev/flights) — installed via setup script
+flights/
+
+# Local dumps
+/tmp-dump-*.json
