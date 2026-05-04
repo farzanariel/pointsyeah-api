@@ -10,6 +10,7 @@ import {
   type ProgramResult,
   type Route,
 } from "./pointsyeah.ts";
+import { ensureFreshIdToken } from "./auth.ts";
 
 const execFileP = promisify(execFile);
 const PROJECT_ROOT = path.resolve(import.meta.dirname, "..");
@@ -336,64 +337,94 @@ const transferBanks = (r: Row) =>
   !r.transfer?.length ? "(direct only)" : r.transfer.map((t) => t.code || t.bank).join(", ");
 const truncate = (s: string, n: number) => (s.length <= n ? s : s.slice(0, n - 1) + "…");
 
-const COLS = {
-  program: 26,
-  operates: 8,
-  flight: 14,
-  times: 14,
-  route: 14,
-  dur: 6,
-  cabin: 15,
-  miles: 7,
-  tax: 7,
-  cash: 7,
-  cpp: 5,
-  transfer: 32,
-};
-const HEADER = [
-  "FLIES".padEnd(COLS.operates),
-  "FLIGHT#".padEnd(COLS.flight),
-  "TIMES".padEnd(COLS.times),
-  "ROUTE".padEnd(COLS.route),
-  "DUR".padStart(COLS.dur),
-  "CABIN".padEnd(COLS.cabin),
-  "MILES".padStart(COLS.miles),
-  "+TAX".padStart(COLS.tax),
-  "CASH".padStart(COLS.cash),
-  "CPP".padStart(COLS.cpp),
-  "BOOK WITH".padEnd(COLS.program),
-  "TRANSFER FROM",
-].join("  ");
-
 const ANSI_BOLD_GREEN = "\x1b[1;32m";
 const ANSI_DIM = "\x1b[2m";
 const ANSI_RESET = "\x1b[0m";
 const isTTY = !!process.stdout.isTTY && !values.json;
 
-function formatRow(r: Row): string {
-  const cash = matchCashForRow(r);
-  const cashStr = cash ? `$${cash.price}` : "—";
-  const cpp =
-    cash && r.payment.miles > 0
-      ? ((cash.price - r.payment.tax) / r.payment.miles) * 100
-      : null;
-  const cppStr = cpp != null ? `${cpp.toFixed(2)}¢` : "—";
-  const line = [
-    operatedBy(r).padEnd(COLS.operates),
-    truncate(flightNums(r), COLS.flight).padEnd(COLS.flight),
-    times(r).padEnd(COLS.times),
-    routePath(r).padEnd(COLS.route),
-    fmtMins(r.duration).padStart(COLS.dur),
-    r.payment.cabin.padEnd(COLS.cabin),
-    r.payment.miles.toLocaleString().padStart(COLS.miles),
-    `$${r.payment.tax.toFixed(2)}`.padStart(COLS.tax),
-    cashStr.padStart(COLS.cash),
-    cppStr.padStart(COLS.cpp),
-    truncate(r.programName, COLS.program).padEnd(COLS.program),
-    truncate(transferBanks(r), COLS.transfer),
-  ].join("  ");
+// Each column knows its header, how to render a row's cell, alignment, the
+// width it'd like, the minimum it'll shrink to, and a drop priority — lower
+// priority columns are dropped first when the terminal is narrow.
+type ColSpec = {
+  key: string;
+  header: string;
+  align: "L" | "R";
+  base: number;
+  min: number;     // == base for non-shrinkable cols
+  priority: number; // lower = dropped first; Infinity = never drop
+  get: (r: Row) => string;
+};
+
+const COL_SPECS: ColSpec[] = [
+  { key: "flies",    header: "FLIES",         align: "L", base: 8,  min: 8,  priority: Infinity, get: (r) => operatedBy(r) },
+  { key: "flight",   header: "FLIGHT#",       align: "L", base: 14, min: 8,  priority: Infinity, get: (r) => flightNums(r) },
+  { key: "times",    header: "TIMES",         align: "L", base: 14, min: 14, priority: 5,        get: (r) => times(r) },
+  { key: "route",    header: "ROUTE",         align: "L", base: 14, min: 8,  priority: 1,        get: (r) => routePath(r) },
+  { key: "dur",      header: "DUR",           align: "R", base: 6,  min: 6,  priority: 3,        get: (r) => fmtMins(r.duration) },
+  { key: "cabin",    header: "CABIN",         align: "L", base: 15, min: 8,  priority: 2,        get: (r) => r.payment.cabin },
+  { key: "miles",    header: "MILES",         align: "R", base: 7,  min: 7,  priority: Infinity, get: (r) => r.payment.miles.toLocaleString() },
+  { key: "tax",      header: "+TAX",          align: "R", base: 7,  min: 7,  priority: 6,        get: (r) => `$${r.payment.tax.toFixed(2)}` },
+  { key: "cash",     header: "CASH",          align: "R", base: 7,  min: 7,  priority: Infinity, get: (r) => { const c = matchCashForRow(r); return c ? `$${c.price}` : "—"; } },
+  { key: "cpp",      header: "CPP",           align: "R", base: 6,  min: 6,  priority: Infinity, get: (r) => { const c = cppOf(r); return c != null ? `${c.toFixed(2)}¢` : "—"; } },
+  { key: "program",  header: "BOOK WITH",     align: "L", base: 26, min: 14, priority: 7,        get: (r) => r.programName },
+  { key: "transfer", header: "TRANSFER FROM", align: "L", base: 32, min: 12, priority: 4,        get: (r) => transferBanks(r) },
+];
+
+const COL_GAP = 2;
+
+function pickLayout(termWidth: number): ColSpec[] {
+  const fit = (cols: ColSpec[], widths: Map<string, number>) =>
+    cols.reduce((s, c) => s + (widths.get(c.key) ?? c.base), 0) + COL_GAP * Math.max(0, cols.length - 1);
+
+  let cols = [...COL_SPECS];
+  const widths = new Map(cols.map((c) => [c.key, c.base] as const));
+
+  // Step 1: drop lowest-priority columns until what's left COULD fit at min widths.
+  const dropOrder = [...cols]
+    .filter((c) => Number.isFinite(c.priority))
+    .sort((a, b) => a.priority - b.priority);
+  for (const c of dropOrder) {
+    const minTotal = cols.reduce((s, x) => s + x.min, 0) + COL_GAP * Math.max(0, cols.length - 1);
+    if (minTotal <= termWidth) break;
+    cols = cols.filter((x) => x.key !== c.key);
+    widths.delete(c.key);
+  }
+
+  // Step 2: shrink shrinkable columns from base toward min until we fit.
+  for (const c of cols) {
+    if (fit(cols, widths) <= termWidth) break;
+    const cur = widths.get(c.key)!;
+    if (cur > c.min) {
+      const overage = fit(cols, widths) - termWidth;
+      widths.set(c.key, Math.max(c.min, cur - overage));
+    }
+  }
+
+  return cols.map((c) => ({ ...c, base: widths.get(c.key)! }));
+}
+
+function renderCell(text: string, width: number, align: "L" | "R") {
+  const t = truncate(text, width);
+  return align === "L" ? t.padEnd(width) : t.padStart(width);
+}
+
+function buildHeader(layout: ColSpec[]) {
+  return layout
+    .map((c) => (c.align === "L" ? c.header.padEnd(c.base) : c.header.padStart(c.base)))
+    .join(" ".repeat(COL_GAP));
+}
+
+function formatRowWithLayout(r: Row, layout: ColSpec[]): string {
+  const line = layout.map((c) => renderCell(c.get(r), c.base, c.align)).join(" ".repeat(COL_GAP));
+  const cpp = cppOf(r);
   if (isTTY && cpp != null && cpp >= CPP_HIGHLIGHT) return ANSI_BOLD_GREEN + line + ANSI_RESET;
   return line;
+}
+
+function currentLayout(): ColSpec[] {
+  // Re-read each render so resizing the terminal mid-search reflows the table.
+  const w = process.stdout.columns ?? 200;
+  return pickLayout(Math.max(60, w));
 }
 
 // --- Live state shared between points polling and cash queries ---
@@ -446,9 +477,11 @@ function render() {
   const baseline = cashBaselineLine();
   if (baseline) lines.push(baseline);
   lines.push("");
-  lines.push(HEADER);
-  lines.push("-".repeat(HEADER.length));
-  for (const r of rows) lines.push(formatRow(r));
+  const layout = currentLayout();
+  const header = buildHeader(layout);
+  lines.push(header);
+  lines.push("-".repeat(header.length));
+  for (const r of rows) lines.push(formatRowWithLayout(r, layout));
   lines.push("");
   lines.push(
     `Showing ${rows.length} of ${[...mergedPrograms.values()].flatMap((p) => p.routes).length} returned (${mergedPrograms.size} programs).`,
@@ -459,6 +492,22 @@ function render() {
 }
 
 // --- kick off ---
+
+try {
+  const token = await ensureFreshIdToken();
+  process.env.POINTSYEAH_ID_TOKEN = token;
+} catch (e) {
+  const msg = (e as Error).message ?? String(e);
+  if (!values.json) {
+    if (msg.includes("auth-setup")) {
+      console.log(
+        "No saved Playwright session. Run `npm run auth-setup` once to sign in via Google.",
+      );
+    } else {
+      console.log(msg);
+    }
+  }
+}
 
 const auth = getAuthContext();
 if (!values.json) {
@@ -526,9 +575,11 @@ render();
 // In non-TTY mode (piped output), no streaming happened; print one batch now.
 if (!isTTY) {
   const rows = buildRows();
-  console.log(HEADER);
-  console.log("-".repeat(HEADER.length));
-  for (const r of rows) console.log(formatRow(r));
+  const layout = currentLayout();
+  const header = buildHeader(layout);
+  console.log(header);
+  console.log("-".repeat(header.length));
+  for (const r of rows) console.log(formatRowWithLayout(r, layout));
   console.log(
     `\nShowing ${rows.length} of ${[...mergedPrograms.values()].flatMap((p) => p.routes).length} returned (${mergedPrograms.size} programs, sorted by ${values.sort}).`,
   );

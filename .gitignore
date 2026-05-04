@@ -12,3 +12,5 @@ flights/
 
 # Local dumps
 /tmp-dump-*.json
+.auth-state
+.cache

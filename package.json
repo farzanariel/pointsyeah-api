@@ -4,9 +4,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "search": "tsx src/test-search.ts"
+    "search": "tsx src/test-search.ts",
+    "auth-setup": "tsx scripts/auth-setup.ts",
+    "auth-refresh": "tsx scripts/auth-refresh.ts"
   },
   "devDependencies": {
+    "playwright": "^1.59.1",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
     "tsx": "^4.19.2",
     "typescript": "^5.6.3"
   }
