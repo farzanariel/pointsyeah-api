@@ -136,6 +136,9 @@ Options:
   -a, --airline <code>  operating airline (UA, AA, B6…)
                         strict: every segment must match
                         repeatable
+      --aircraft <s>    aircraft type substring (787, a350, 777-300…)
+                        case-insensitive; every segment must match one
+                        repeatable
   -s, --sort <field>    miles | duration | tax | departure | cpp   default: miles
                         cpp = best cents-per-point (highest first)
   -n, --limit <n>       default: all  (pass a number to truncate)
@@ -159,6 +162,7 @@ try {
       bank: { type: "string", multiple: true, short: "b" },
       program: { type: "string", multiple: true, short: "p" },
       airline: { type: "string", multiple: true, short: "a" },
+      aircraft: { type: "string", multiple: true },
       sort: { type: "string", short: "s", default: "miles" },
       limit: { type: "string", short: "n" },
       return: { type: "string", short: "r" },
@@ -270,6 +274,9 @@ const programFilter = values.program?.length
 const airlineFilter = values.airline?.length
   ? new Set(values.airline.map((s) => s.toUpperCase()))
   : null;
+const aircraftFilter = values.aircraft?.length
+  ? values.aircraft.map((s) => s.trim().toLowerCase()).filter(Boolean)
+  : null;
 
 interface Row extends Route {
   programName: string;
@@ -290,6 +297,13 @@ function passesFilters(r: Row): boolean {
   if (airlineFilter) {
     const carriers = operatingCarriers(r);
     if (![...carriers].every((c) => airlineFilter.has(c))) return false;
+  }
+  if (aircraftFilter) {
+    const allMatch = r.segments.every((s) => {
+      const a = (s.aircraft ?? "").toLowerCase();
+      return aircraftFilter.some((needle) => a.includes(needle));
+    });
+    if (!allMatch) return false;
   }
   if (bankFilter) {
     const banks = (r.transfer ?? []).map((t) => normalizeBank(t.code || t.bank));
