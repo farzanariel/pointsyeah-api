@@ -111,12 +111,17 @@ async function readBody(req: http.IncomingMessage): Promise<unknown> {
 }
 
 const httpServer = http.createServer(async (req, res) => {
+  const reqId = Math.random().toString(36).slice(2, 8);
+  console.log(`[mcp ${reqId}] ${req.method} ${req.url} accept=${req.headers.accept ?? "-"} ct=${req.headers["content-type"] ?? "-"}`);
+
   if (req.url !== "/mcp") {
     res.writeHead(404).end("not found");
+    console.log(`[mcp ${reqId}] -> 404 (path)`);
     return;
   }
   if (!checkAuth(req)) {
     res.writeHead(401, { "WWW-Authenticate": "Bearer" }).end("unauthorized");
+    console.log(`[mcp ${reqId}] -> 401 (auth)`);
     return;
   }
 
@@ -127,14 +132,19 @@ const httpServer = http.createServer(async (req, res) => {
     });
     const server = buildServer();
     await server.connect(transport);
-    const body = req.method === "POST" ? await readBody(req) : undefined;
+    let body: unknown;
+    if (req.method === "POST") {
+      body = await readBody(req);
+      console.log(`[mcp ${reqId}] body=${JSON.stringify(body).slice(0, 300)}`);
+    }
     await transport.handleRequest(req, res, body);
+    console.log(`[mcp ${reqId}] -> ${res.statusCode}`);
     res.on("close", () => {
       transport.close();
       server.close();
     });
   } catch (e) {
-    console.error("[mcp] request failed:", e);
+    console.error(`[mcp ${reqId}] failed:`, e);
     if (!res.headersSent) {
       res.writeHead(500, { "content-type": "application/json" });
       res.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32603, message: "internal error" }, id: null }));
