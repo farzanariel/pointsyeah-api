@@ -180,7 +180,7 @@ async def _run_batch(items: list[dict[str, Any]]) -> dict[str, list[dict[str, An
         if airlines is not None and not isinstance(airlines, list):
             airlines = None
         airline_tag = ",".join(airlines) if airlines else "*"
-        key = f"{date}|{cabin_raw}|{airline_tag}"
+        key = f"{from_airport}|{to_airport}|{date}|{cabin_raw}|{airline_tag}"
         async with sem:
             try:
                 trips = await asyncio.to_thread(
