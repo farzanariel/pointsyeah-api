@@ -139,6 +139,7 @@ Options:
   -s, --sort <field>    miles | duration | tax | departure | cpp   default: miles
                         cpp = best cents-per-point (highest first)
   -n, --limit <n>       default: all  (pass a number to truncate)
+  -r, --return <date>   return date (MM/DD/YYYY or YYYY-MM-DD); enables round-trip search
       --no-cache        bypass disk cache for cash quotes (1h TTL)
       --json            raw JSON output (skip table)
   -h, --help            show this
@@ -160,6 +161,7 @@ try {
       airline: { type: "string", multiple: true, short: "a" },
       sort: { type: "string", short: "s", default: "miles" },
       limit: { type: "string", short: "n" },
+      return: { type: "string", short: "r" },
       "no-cache": { type: "boolean" },
       json: { type: "boolean" },
       help: { type: "boolean", short: "h" },
@@ -197,6 +199,12 @@ if (!dep || !arr || !date || !IATA.test(dep) || !IATA.test(arr)) {
     `Need <DEP> <ARR> <MM/DD/YYYY> as positional args.\n` +
       `Got: dep=${JSON.stringify(dep)} arr=${JSON.stringify(arr)} date=${JSON.stringify(dateRaw)}\n\n${HELP}`,
   );
+  process.exit(1);
+}
+
+const returnDate = normalizeDate(values.return as string | undefined);
+if (values.return !== undefined && !returnDate) {
+  console.error(`Invalid --return date: "${values.return}". Expected MM/DD/YYYY or YYYY-MM-DD.`);
   process.exit(1);
 }
 
@@ -266,6 +274,7 @@ const airlineFilter = values.airline?.length
 interface Row extends Route {
   programName: string;
   programCode: string;
+  leg: "outbound" | "return";
 }
 
 const stops = (r: Row) => r.segments.length - 1;
@@ -328,7 +337,7 @@ const useCache = !values["no-cache"];
 // query time gives us exact prices for every flight that airline operates
 // on that date — no more "cheapest-of-day" misleading fallbacks.
 const cashByDateCabinAirline = new Map<string, CashTrip[]>();
-const cashKey = (d: string, c: Cabin, a: string) => `${d}|${c}|${a}`;
+const cashKey = (from: string, to: string, d: string, c: Cabin, a: string) => `${from}|${to}|${d}|${c}|${a}`;
 const firstSegmentAirline = (r: Row): string | undefined =>
   r.segments[0].flight_number.match(/^[A-Z0-9]{2}/)?.[0];
 
@@ -344,7 +353,9 @@ function matchCashForRow(r: Row): CashMatch | undefined {
   const airline = firstSegmentAirline(r);
   if (!airline) return undefined;
 
-  const trips = cashByDateCabinAirline.get(cashKey(rowDate, cabin, airline));
+  const from = r.segments[0].da;
+  const to = r.segments[r.segments.length - 1].aa;
+  const trips = cashByDateCabinAirline.get(cashKey(from, to, rowDate, cabin, airline));
   if (!trips?.length) return undefined;
 
   const seg0 = r.segments[0];
@@ -419,6 +430,9 @@ const formatShortDate = (iso: string) => {
 const COL_SPECS: ColSpec[] = [
   ...(flexDays > 0
     ? [{ key: "date" as const, header: "DATE", align: "L" as const, base: 6, min: 6, priority: Infinity, get: (r: Row) => formatShortDate(r.segments[0].dt) }]
+    : []),
+  ...(returnDate
+    ? [{ key: "leg" as const, header: "LEG", align: "L" as const, base: 4, min: 4, priority: Infinity, get: (r: Row) => r.leg === "outbound" ? "OUT" : "RET" }]
     : []),
   { key: "flies",    header: "FLIES",         align: "L", base: 8,  min: 8,  priority: Infinity, get: (r) => operatedBy(r) },
   { key: "flight",   header: "FLIGHT#",       align: "L", base: 14, min: 8,  priority: Infinity, get: (r) => flightNums(r) },
@@ -500,11 +514,20 @@ const t0 = Date.now();
 
 function buildRows(): Row[] {
   const all: Row[] = [...mergedPrograms.values()].flatMap((p) =>
-    p.routes.map((r) => ({ ...r, programName: p.program, programCode: p.code })),
+    p.routes.map((r) => ({
+      ...r,
+      programName: p.program,
+      programCode: p.code,
+      leg: p.departure === dep ? ("outbound" as const) : ("return" as const),
+    })),
   );
   const filtered = all.filter(passesFilters);
   filtered.sort(sortFn);
   return Number.isFinite(limit) ? filtered.slice(0, limit) : filtered;
+}
+
+function buildLegRows(leg: "outbound" | "return"): Row[] {
+  return buildRows().filter((r) => r.leg === leg);
 }
 
 function statusLine(): string {
@@ -586,9 +609,10 @@ if (!values.json) {
   } else {
     console.log("Auth: none — expect synthetic teaser data. Set POINTSYEAH_ID_TOKEN in .env.");
   }
-  const [y, m, d] = date.split("-");
+  const [y, m, d] = date!.split("-");
+  const rtSuffix = returnDate ? ` | return ${returnDate.split("-").slice(1).concat(returnDate.split("-")[0]).join("/")}` : "";
   console.log(
-    `Searching ${dep} → ${arr} on ${m}/${d}/${y}${flexDays > 0 ? ` (+${flexDays} days)` : ""}${cabins ? ` (cabins: ${cabins.join(", ")})` : ""}…`,
+    `Searching ${dep} → ${arr} on ${m}/${d}/${y}${rtSuffix}${flexDays > 0 ? ` (+${flexDays} days)` : ""}${cabins ? ` (cabins: ${cabins.join(", ")})` : ""}…`,
   );
   console.log("");
 }
@@ -660,12 +684,12 @@ async function doFlush(): Promise<void> {
   for (const key of seenDateCabinAirline) {
     if (cashByDateCabinAirline.has(key)) continue;
     if (inflight.has(key)) continue;
-    const [d, cabinStr, airline] = key.split("|");
+    const [from, to, d, cabinStr, airline] = key.split("|");
     const cabin = cabinStr as Cabin;
 
     // Disk cache first.
     if (useCache) {
-      const file = cacheFileFor(dep, arr, d, cabin, airline);
+      const file = cacheFileFor(from, to, d, cabin, airline);
       const cached = await readCashCache(file);
       if (cached) {
         cashByDateCabinAirline.set(key, cached);
@@ -675,7 +699,7 @@ async function doFlush(): Promise<void> {
 
     inflight.add(key);
     queryKeys.push(key);
-    queries.push({ from: dep, to: arr, date: d, cabin, airlines: [airline] });
+    queries.push({ from, to, date: d, cabin, airlines: [airline] });
   }
 
   if (queries.length === 0) {
@@ -688,8 +712,8 @@ async function doFlush(): Promise<void> {
     cashByDateCabinAirline.set(key, trips);
     inflight.delete(key);
     if (useCache) {
-      const [d, cabinStr, airline] = key.split("|");
-      const file = cacheFileFor(dep, arr, d, cabinStr as Cabin, airline);
+      const [from, to, d, cabinStr, airline] = key.split("|");
+      const file = cacheFileFor(from, to, d, cabinStr as Cabin, airline);
       await writeCashCache(file, trips);
     }
   }
@@ -716,7 +740,7 @@ function scheduleFlush() {
 }
 
 const programs = await search(
-  { departure: dep, arrival: arr, departDate: date, departDateTo, cabins },
+  { departure: dep, arrival: arr, departDate: date!, departDateTo, returnDate: returnDate ?? undefined, cabins: cabins as Cabin[] | undefined },
   {
     pollIntervalMs: 50,
     timeoutMs: 60_000,
@@ -735,13 +759,13 @@ const programs = await search(
               // lands in points results AND passes the user's filters — no
               // point spending a cash query on a row we'd hide anyway.
               for (const route of r.routes) {
-                const row: Row = { ...route, programName: r.program, programCode: r.code };
+                const row: Row = { ...route, programName: r.program, programCode: r.code, leg: r.departure === dep ? "outbound" : "return" };
                 if (!passesFilters(row)) continue;
                 const rowDate = route.segments[0].dt.slice(0, 10);
                 const cabin = route.payment.cabin as Cabin;
                 const airline = route.segments[0].flight_number.match(/^[A-Z0-9]{2}/)?.[0];
                 if (!airline) continue;
-                const tupleKey = cashKey(rowDate, cabin, airline);
+                const tupleKey = cashKey(r.departure, r.arrival, rowDate, cabin, airline);
                 if (!seenDateCabinAirline.has(tupleKey)) {
                   seenDateCabinAirline.add(tupleKey);
                   newTuple = true;
@@ -761,12 +785,12 @@ mergedPrograms.clear();
 for (const p of programs) {
   mergedPrograms.set(`${p.code}|${p.date}|${p.departure}|${p.arrival}`, p);
   for (const route of p.routes) {
-    const row: Row = { ...route, programName: p.program, programCode: p.code };
+    const row: Row = { ...route, programName: p.program, programCode: p.code, leg: p.departure === dep ? "outbound" : "return" };
     if (!passesFilters(row)) continue;
     const rowDate = route.segments[0].dt.slice(0, 10);
     const cabin = route.payment.cabin as Cabin;
     const airline = route.segments[0].flight_number.match(/^[A-Z0-9]{2}/)?.[0];
-    if (airline) seenDateCabinAirline.add(cashKey(rowDate, cabin, airline));
+    if (airline) seenDateCabinAirline.add(cashKey(p.departure, p.arrival, rowDate, cabin, airline));
   }
 }
 // Cancel any pending debounce, await any in-flight batch, then do a final
@@ -781,8 +805,11 @@ cashReady = true;
 render();
 
 if (values.json) {
-  const rows = buildRows();
-  console.log(JSON.stringify(rows, null, 2));
+  if (returnDate) {
+    console.log(JSON.stringify({ outbound: buildLegRows("outbound"), return: buildLegRows("return") }, null, 2));
+  } else {
+    console.log(JSON.stringify(buildRows(), null, 2));
+  }
   process.exit(0);
 }
 
@@ -791,13 +818,27 @@ render();
 
 // In non-TTY mode (piped output), no streaming happened; print one batch now.
 if (!isTTY) {
-  const rows = buildRows();
   const layout = currentLayout();
   const header = buildHeader(layout);
-  console.log(header);
-  console.log("-".repeat(header.length));
-  for (const r of rows) console.log(formatRowWithLayout(r, layout));
-  console.log(
-    `\nShowing ${rows.length} of ${[...mergedPrograms.values()].flatMap((p) => p.routes).length} returned (${mergedPrograms.size} programs, sorted by ${values.sort}).`,
-  );
+  const totalRoutes = [...mergedPrograms.values()].flatMap((p) => p.routes).length;
+  const allRows = buildRows();
+
+  if (returnDate) {
+    const outRows = allRows.filter((r) => r.leg === "outbound");
+    const retRows = allRows.filter((r) => r.leg === "return");
+    console.log(`OUTBOUND: ${dep} → ${arr}`);
+    console.log(header);
+    console.log("-".repeat(header.length));
+    for (const r of outRows) console.log(formatRowWithLayout(r, layout));
+    console.log(`\nRETURN: ${arr} → ${dep}`);
+    console.log(header);
+    console.log("-".repeat(header.length));
+    for (const r of retRows) console.log(formatRowWithLayout(r, layout));
+    console.log(`\nShowing ${outRows.length} outbound + ${retRows.length} return of ${totalRoutes} total (${mergedPrograms.size} programs, sorted by ${values.sort}).`);
+  } else {
+    console.log(header);
+    console.log("-".repeat(header.length));
+    for (const r of allRows) console.log(formatRowWithLayout(r, layout));
+    console.log(`\nShowing ${allRows.length} of ${totalRoutes} returned (${mergedPrograms.size} programs, sorted by ${values.sort}).`);
+  }
 }

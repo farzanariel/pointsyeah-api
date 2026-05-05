@@ -71,6 +71,10 @@ export interface SearchInput {
   departDate: string;
   /** YYYY-MM-DD; defaults to departDate (single-day search) */
   departDateTo?: string;
+  /** YYYY-MM-DD; when set, triggers a round_trip search */
+  returnDate?: string;
+  /** YYYY-MM-DD; defaults to returnDate */
+  returnDateTo?: string;
   cabins?: Cabin[];
   adults?: number;
   children?: number;
@@ -146,19 +150,31 @@ function buildPlaintext(input: SearchInput): string {
     "Business",
     "First",
   ];
-  return JSON.stringify({
-    search_type: "one_way",
-    cabins,
-    segments: [
-      {
-        arrival: input.arrival,
-        departure: input.departure,
-        departure_date: {
-          from: input.departDate,
-          to: input.departDateTo ?? input.departDate,
-        },
+  const isRoundTrip = !!input.returnDate;
+  const segments: object[] = [
+    {
+      arrival: input.arrival,
+      departure: input.departure,
+      departure_date: {
+        from: input.departDate,
+        to: input.departDateTo ?? input.departDate,
       },
-    ],
+    },
+  ];
+  if (isRoundTrip) {
+    segments.push({
+      arrival: input.departure,
+      departure: input.arrival,
+      departure_date: {
+        from: input.returnDate!,
+        to: input.returnDateTo ?? input.returnDate!,
+      },
+    });
+  }
+  return JSON.stringify({
+    search_type: isRoundTrip ? "round_trip" : "one_way",
+    cabins,
+    segments,
     passengers_v2: {
       adults: input.adults ?? 1,
       children: input.children ?? 0,
