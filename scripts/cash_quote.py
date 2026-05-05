@@ -48,11 +48,23 @@ CABINS = {
 }
 
 
-def to_iso(dt: Any) -> str:
-    # fast_flights SimpleDatetime: date=[y,m,d], time=[h,m]
-    y, m, d = dt.date[0], dt.date[1], dt.date[2]
-    hh, mm = dt.time[0], dt.time[1]
-    return datetime(y, m, d, hh, mm).isoformat()
+def to_iso(dt: Any) -> str | None:
+    # fast_flights' SimpleDatetime is documented as date=[y,m,d], time=[h,m],
+    # but in practice it sometimes returns shorter date arrays or None for
+    # time fields when Google's HTML response is partial. Be defensive — if
+    # we can't form a full datetime, return None so the caller can drop the
+    # trip rather than crashing the whole batch.
+    try:
+        date_parts = list(dt.date or [])
+        time_parts = list(dt.time or [])
+        if len(date_parts) < 3 or any(p is None for p in date_parts[:3]):
+            return None
+        y, m, d = date_parts[0], date_parts[1], date_parts[2]
+        hh = time_parts[0] if len(time_parts) >= 1 and time_parts[0] is not None else 0
+        mm = time_parts[1] if len(time_parts) >= 2 and time_parts[1] is not None else 0
+        return datetime(int(y), int(m), int(d), int(hh), int(mm)).isoformat()
+    except Exception:
+        return None
 
 
 def _silence_fast_flights_debug_print() -> None:
@@ -122,16 +134,21 @@ def _run_query(
             segments = list(trip.flights)
             if not segments:
                 continue
+            departure = to_iso(segments[0].departure)
+            arrival = to_iso(segments[-1].arrival)
+            if departure is None or arrival is None:
+                # Partial datetime from fast_flights — drop this trip.
+                continue
             trips.append(
                 {
                     "price": trip.price,
                     "airlines": list(trip.airlines),
                     "stops": max(0, len(segments) - 1),
-                    "duration_minutes": sum(s.duration for s in segments),
-                    "departure": to_iso(segments[0].departure),
-                    "arrival": to_iso(segments[-1].arrival),
-                    "from": segments[0].from_airport.code,
-                    "to": segments[-1].to_airport.code,
+                    "duration_minutes": sum((s.duration or 0) for s in segments),
+                    "departure": departure,
+                    "arrival": arrival,
+                    "from": segments[0].from_airport.code if segments[0].from_airport else None,
+                    "to": segments[-1].to_airport.code if segments[-1].to_airport else None,
                 }
             )
         except Exception:
