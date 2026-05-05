@@ -530,6 +530,17 @@ function buildLegRows(leg: "outbound" | "return"): Row[] {
   return buildRows().filter((r) => r.leg === leg);
 }
 
+function toJsonRow(r: Row) {
+  const m = matchCashForRow(r);
+  const cpp = cppOf(r);
+  return {
+    ...r,
+    cash_price: m?.trip.price ?? null,
+    cash_approximate: m?.approximate ?? null,
+    cpp: cpp,
+  };
+}
+
 function statusLine(): string {
   const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
   const totalRoutes = [...mergedPrograms.values()].reduce((s, p) => s + p.routes.length, 0);
@@ -806,9 +817,9 @@ render();
 
 if (values.json) {
   if (returnDate) {
-    console.log(JSON.stringify({ outbound: buildLegRows("outbound"), return: buildLegRows("return") }, null, 2));
+    console.log(JSON.stringify({ outbound: buildLegRows("outbound").map(toJsonRow), return: buildLegRows("return").map(toJsonRow) }, null, 2));
   } else {
-    console.log(JSON.stringify(buildRows(), null, 2));
+    console.log(JSON.stringify(buildRows().map(toJsonRow), null, 2));
   }
   process.exit(0);
 }

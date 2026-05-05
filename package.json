@@ -6,8 +6,13 @@
   "scripts": {
     "search": "tsx src/test-search.ts",
     "watch": "tsx src/watch.ts",
+    "mcp": "tsx src/mcp-server.ts",
     "auth-setup": "tsx scripts/auth-setup.ts",
     "auth-refresh": "tsx scripts/auth-refresh.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "zod": "^3.23.8"
   },
   "devDependencies": {
     "playwright": "^1.59.1",
