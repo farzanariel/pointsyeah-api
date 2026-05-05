@@ -46,63 +46,97 @@ AA        AA513           3:05p-11:18p    43,600    $5.60    $658   1.50¢  Qant
 
 ## Setup
 
-Requires **Node 22+** (for `process.loadEnvFile` and the native `tsx` ESM loader) and **Python 3.10+**.
+Requires **Node 22+** and **Python 3.10+**.
+
+There are two paths depending on your situation. **Most likely you want Path A.**
+
+### Path A — Cloning a working repo (this is the agent path)
+
+If `auth.json` is committed to the repo (the default for this repo's main branch), the headless auth refresh just works on any machine — no interactive sign-in needed:
 
 ```bash
-# 1. Install Node deps (this also installs Playwright, used by auth-setup)
+# 1. Clone (private repo, you'll need access)
+git clone https://github.com/farzanariel/pointsyeah-cli.git
+cd pointsyeah-cli
+
+# 2. Install Node deps + Playwright Chromium (~150MB)
 npm install
 npx playwright install chromium
+# On Linux you may also need: npx playwright install-deps chromium
 
-# 2. Set up Python venv for the cash-price side
+# 3. Set up Python venv for the cash-price side
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 
-# 3. Sign in to pointsyeah once — see "Authentication" below
-npm run auth-setup
+# 4. (VPS / datacenter only) export a residential proxy — see "Running on a VPS"
+# export POINTSYEAH_PROXY='http://user:pass@host:port'
+
+# 5. Run a search
+npm run search -- JFK LAX 06/09/2026 -c economy --nonstop
 ```
 
-Without authentication the pointsyeah API returns synthetic teaser data; once signed in you get real award availability.
+The first search reads `auth.json`, mints a fresh ID token via headless Playwright, and proceeds. Subsequent searches reuse the cached token (`~/.cache/pointsyeah/idToken`) until it expires (~1h), then auto-refresh kicks in again.
 
-## Authentication
+### Path B — Bootstrapping from scratch (no `auth.json` yet)
 
-pointsyeah authenticates every API request with a short-lived (~1 hour) Firebase ID token. This CLI takes a browser-automation approach to handle that without any manual copy-paste:
-
-### One-time setup
+If `auth.json` is missing or stale (Cognito refresh tokens last ~30 days), do an interactive sign-in once on a machine with a desktop:
 
 ```bash
-npm run auth-setup
+npm install && npx playwright install chromium
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+npm run auth-setup           # opens a Chromium window — sign in
+git add auth.json && git commit -m "auth: refresh auth.json" && git push
 ```
 
-This launches a Chromium window via Playwright. Sign in to [pointsyeah.com](https://www.pointsyeah.com) however you normally do (Google sign-in works). Once the script captures an authenticated request to `api2.pointsyeah.com` it saves your token to `~/.cache/pointsyeah/idToken` (mode `0600`) and your browser profile to `./.auth-state/`. The window closes automatically.
+After that, agents/VPSes pulling the repo follow Path A.
 
-> **Tip:** if the script just sits there after you finish signing in, run a flight search on the page — that's what triggers the API call it's listening for.
+> If `auth-setup` just sits there after you sign in, run a flight search on the page — that triggers the auth'd API call the script listens for.
 
-### Auto-refresh on expiry
+### Running on a VPS / datacenter
 
-After the one-time setup, **you don't have to do anything else**. Before each search the CLI:
+Two things behave differently on datacenter IPs:
 
-1. Reads the cached token from `~/.cache/pointsyeah/idToken`.
-2. Decodes the JWT's `exp` claim. If the token is still valid (>5 minutes from expiry), it's used as-is.
-3. If it's expired or about to expire, a **headless** Playwright session loads the saved profile, hits a search URL, captures the fresh authenticated request, and writes the new token to disk. This typically takes a few seconds and only happens once per session.
+- **Pointsyeah API**: works fine — auth-refresh from `auth.json` succeeds with no proxy.
+- **Google Flights (cash side)**: serves a different (unparseable) page to datacenter IPs. You need a residential proxy.
 
-If your saved browser profile gets logged out (cookies expired, password reset, etc.), you'll see `Auth not set up. Run: npm run auth-setup` — just re-run the one-time setup and you're back.
+Set one env var and the cash queries route through the proxy automatically:
+
+```bash
+export POINTSYEAH_PROXY='http://user:pass@residential-proxy.example:1234'
+npm run search -- JFK LAX 06/09/2026 -c economy
+```
+
+`POINTSYEAH_PROXY` accepts any `http://user:pass@host:port`. It's read by both `auth-refresh.ts` (in case Pointsyeah ever needs it too) and `cash_quote.py`.
+
+A pre-baked wrapper that exports the proxy and forwards args is convenient for agents:
+
+```bash
+#!/usr/bin/env bash
+# run.sh
+export POINTSYEAH_PROXY='http://user:pass@host:port'
+cd "$(dirname "$0")"
+exec npm run --silent search -- "$@"
+```
+
+Then the agent just calls `./run.sh JFK LAX 06/09/2026 ...`.
+
+## Authentication internals
+
+- **`auth.json`** (committed): a Playwright [`storageState`](https://playwright.dev/docs/api/class-browsercontext#browser-context-storage-state) JSON containing decrypted cookies for `www.pointsyeah.com` — including the AWS Cognito `refreshToken` (~30 day TTL), `idToken`, `accessToken`, and `LastAuthUser`. This is what makes the refresh portable across machines.
+- **`~/.cache/pointsyeah/idToken`** (local, gitignored, mode 0600): the short-lived (~1h) JWT used to authorize each API call. The CLI re-mints this from `auth.json` whenever it's within 5 min of expiring.
+- **`.auth-state/`** (gitignored): Playwright's persistent Chromium profile from `auth-setup`. Used only on the machine that ran `auth-setup`. Not portable — Chromium encrypts cookie values with the host OS keyring (Keychain / Secret Service), so the encrypted blob is unreadable on any other machine. That's why we extract a portable `auth.json` instead.
+
+### Why not just commit a JWT?
+
+A JWT lasts ~1 hour. A Cognito `refreshToken` (what's in `auth.json`) lasts ~30 days and is silently rotated on each refresh, so the repo stays usable for a month at a time without any human intervention.
 
 ### Manual refresh
 
-If you want to force a refresh without waiting for the next search:
-
 ```bash
-npm run auth-refresh
+npm run auth-refresh   # mints a new idToken from auth.json
 ```
 
-### Files written to disk
-
-| Path | What | Why it's gitignored |
-|---|---|---|
-| `~/.cache/pointsyeah/idToken` | the active JWT (mode 0600) | sensitive — outside the repo entirely |
-| `./.auth-state/` | Playwright's persistent Chromium profile (cookies, localStorage) | sensitive — keeps you logged in |
-
-Both are already in `.gitignore`. Treat them like a password.
+If you ever see `Auth not set up. Run: npm run auth-setup`, the refresh token in `auth.json` has expired or been revoked. Run `npm run auth-setup` interactively, commit the new `auth.json`, push.
 
 ## Usage
 
