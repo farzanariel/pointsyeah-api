@@ -643,3 +643,4 @@ if (!isTTY) {
   }
 }
 
+process.exit(0);
