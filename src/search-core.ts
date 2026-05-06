@@ -387,15 +387,11 @@ export function addDaysISO(iso: string, n: number): string {
 /**
  * One-shot pipeline used by the MCP server.
  *
- * Steps:
- *  1. Refresh idToken if needed (Playwright-backed).
- *  2. Run PointsYeah search end-to-end (no live streaming).
- *  3. Build EnrichedRow[] with leg + program metadata.
- *  4. Apply filters.
- *  5. For surviving rows, fetch cash batch (one query per
- *     (from,to,date,cabin,operating-airline) tuple).
- *  6. Match cash + compute CPP per row.
- *  7. Sort + limit.
+ * Cash queries are interleaved with the PointsYeah polling: as program
+ * results land, we extract (from,to,date,cabin,airline) tuples and queue
+ * cash batches in parallel with debouncing. By the time PointsYeah's poll
+ * loop finishes, most cash queries are already done. This typically halves
+ * the wall-clock time for cold-cache calls.
  */
 export async function runSearch(opts: RunSearchOptions): Promise<RunSearchResult> {
   const startedAt = Date.now();
@@ -404,9 +400,93 @@ export async function runSearch(opts: RunSearchOptions): Promise<RunSearchResult
   const token = await ensureFreshIdToken();
   process.env.POINTSYEAH_ID_TOKEN = token;
 
-  // 2. PointsYeah search
   const flexDays = Math.max(0, Math.min(60, opts.flexDays ?? 0));
   const departDateTo = flexDays > 0 ? addDaysISO(opts.date, flexDays) : undefined;
+
+  // Cash pipeline state.
+  const cashByKey = new Map<string, CashTrip[]>();
+  const useCache = !opts.noCache;
+  const seen = new Set<string>();
+  const inflight = new Set<string>();
+  let flushPromise: Promise<void> | null = null;
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function tupleKeyForRoute(route: Route): string | undefined {
+    const airline = firstSegmentAirline(route);
+    if (!airline) return undefined;
+    const seg0 = route.segments[0];
+    const segLast = route.segments[route.segments.length - 1];
+    if (!seg0 || !segLast) return undefined;
+    const rowDate = seg0.dt.slice(0, 10);
+    const cabin = route.payment.cabin as Cabin;
+    return cashCacheKey(seg0.da, segLast.aa, rowDate, cabin, airline);
+  }
+
+  async function doFlush(): Promise<void> {
+    const queries: BatchQuery[] = [];
+    const queryKeys: string[] = [];
+    for (const key of seen) {
+      if (cashByKey.has(key) || inflight.has(key)) continue;
+      const [from, to, d, cabinStr, airline] = key.split("|");
+      const cabin = cabinStr as Cabin;
+      if (useCache) {
+        const file = cashCacheFile(from, to, d, cabin, airline);
+        const cached = await readCashCache(file);
+        if (cached && cached.length > 0) {
+          cashByKey.set(key, cached);
+          continue;
+        }
+      }
+      inflight.add(key);
+      queryKeys.push(key);
+      queries.push({ from, to, date: d, cabin, airlines: [airline] });
+    }
+    if (queries.length === 0) return;
+    const results = await runCashBatch(queries);
+    for (const key of queryKeys) {
+      const trips = results[key] ?? [];
+      cashByKey.set(key, trips);
+      inflight.delete(key);
+      if (useCache && trips.length > 0) {
+        const [from, to, d, cabinStr, airline] = key.split("|");
+        const file = cashCacheFile(from, to, d, cabinStr as Cabin, airline);
+        await writeCashCache(file, trips);
+      }
+    }
+  }
+
+  async function flush(): Promise<void> {
+    while (flushPromise) await flushPromise;
+    flushPromise = doFlush().finally(() => {
+      flushPromise = null;
+    });
+    return flushPromise;
+  }
+
+  function scheduleFlush(): void {
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      debounceTimer = null;
+      void flush();
+    }, 300);
+  }
+
+  function enqueueRoute(p: ProgramResult, route: Route): boolean {
+    const enriched: EnrichedRow = {
+      ...route,
+      programName: p.program,
+      programCode: p.code,
+      leg: p.departure === opts.from ? "outbound" : "return",
+      cpp: null,
+    };
+    if (!passesFilters(enriched, opts.filters)) return false;
+    const key = tupleKeyForRoute(route);
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }
+
+  // 2. PointsYeah search with interleaved cash.
   const programs = await search(
     {
       departure: opts.from,
@@ -416,10 +496,41 @@ export async function runSearch(opts: RunSearchOptions): Promise<RunSearchResult
       returnDate: opts.returnDate,
       cabins: opts.cabins,
     },
-    { pollIntervalMs: 50, timeoutMs: 60_000 },
+    {
+      pollIntervalMs: 50,
+      timeoutMs: 60_000,
+      onUpdate: opts.skipCash
+        ? undefined
+        : (snap) => {
+            let newTuple = false;
+            for (const p of snap.data?.result ?? []) {
+              for (const route of p.routes) {
+                if (enqueueRoute(p, route)) newTuple = true;
+              }
+            }
+            if (newTuple) scheduleFlush();
+          },
+    },
   );
 
-  // 3. Build EnrichedRow list (cash not yet attached).
+  // 3. Reconcile final view (catch any tuples missed during streaming).
+  if (!opts.skipCash) {
+    for (const p of programs) {
+      for (const route of p.routes) {
+        enqueueRoute(p, route);
+      }
+    }
+
+    // Wait for any in-flight, then do one final flush.
+    if (debounceTimer) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
+    if (flushPromise) await flushPromise;
+    await flush();
+  }
+
+  // 4. Build EnrichedRow list (cash not yet attached).
   const rawRows: EnrichedRow[] = [];
   for (const p of programs) {
     for (const route of p.routes) {
@@ -434,78 +545,19 @@ export async function runSearch(opts: RunSearchOptions): Promise<RunSearchResult
   }
   const totalRoutesReturned = rawRows.length;
 
-  // 4. Filter (cash-independent filters first; CPP filters not supported here).
+  // 5. Filter, attach cash + CPP, sort, limit.
   const passing = rawRows.filter((r) => passesFilters(r, opts.filters));
-
-  // 5. Cash: collect (from,to,date,cabin,airline) tuples we need.
-  const cashByKey = new Map<string, CashTrip[]>();
-  if (!opts.skipCash) {
-    const useCache = !opts.noCache;
-    const tuples = new Map<string, BatchQuery>();
-    for (const r of passing) {
-      const airline = firstSegmentAirline(r);
-      if (!airline) continue;
-      const rowDate = r.segments[0].dt.slice(0, 10);
-      const cabin = r.payment.cabin as Cabin;
-      const seg0 = r.segments[0];
-      const segLast = r.segments[r.segments.length - 1];
-      const from = seg0.da;
-      const to = segLast.aa;
-      const key = cashCacheKey(from, to, rowDate, cabin, airline);
-      if (!tuples.has(key)) {
-        tuples.set(key, { from, to, date: rowDate, cabin, airlines: [airline] });
-      }
-    }
-
-    // Disk cache pass.
-    const toFetch: BatchQuery[] = [];
-    const fetchKeys: string[] = [];
-    for (const [key, q] of tuples) {
-      if (useCache) {
-        const file = cashCacheFile(q.from, q.to, q.date, q.cabin, q.airlines[0]);
-        const cached = await readCashCache(file);
-        if (cached && cached.length > 0) {
-          cashByKey.set(key, cached);
-          continue;
-        }
-      }
-      toFetch.push(q);
-      fetchKeys.push(key);
-    }
-
-    // Python batch for the rest.
-    if (toFetch.length > 0) {
-      const results = await runCashBatch(toFetch);
-      for (const key of fetchKeys) {
-        const trips = results[key] ?? [];
-        cashByKey.set(key, trips);
-        if (useCache && trips.length > 0) {
-          const q = tuples.get(key)!;
-          const file = cashCacheFile(q.from, q.to, q.date, q.cabin, q.airlines[0]);
-          await writeCashCache(file, trips);
-        }
-      }
-    }
-  }
-
-  // 6. Attach cash + compute CPP.
   for (const r of passing) {
-    const airline = firstSegmentAirline(r);
-    if (!airline) continue;
-    const rowDate = r.segments[0].dt.slice(0, 10);
-    const cabin = r.payment.cabin as Cabin;
-    const seg0 = r.segments[0];
-    const segLast = r.segments[r.segments.length - 1];
-    const key = cashCacheKey(seg0.da, segLast.aa, rowDate, cabin, airline);
+    const key = tupleKeyForRoute(r);
+    if (!key) continue;
     const trips = cashByKey.get(key);
     if (!trips?.length) continue;
-    const m = matchCash(r, cabin, trips);
+    const m = matchCash(r, r.payment.cabin as Cabin, trips);
     if (!m) continue;
     r.cashMatch = m;
     r.cpp = computeCpp(r.payment.miles, r.payment.tax, m.trip.price);
   }
 
-  // 7. Sort + limit.
   const sorted = sortRows(passing, opts.sort ?? "miles");
   const limited =
     opts.limit && opts.limit > 0 && Number.isFinite(opts.limit)
