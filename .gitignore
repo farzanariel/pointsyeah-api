@@ -7,6 +7,10 @@ node_modules
 __pycache__
 *.pyc
 
+# Personal auth state — never commit. Each user runs `npm run auth-setup`
+# to generate their own. Override path with POINTSYEAH_AUTH_PATH.
+auth.json
+
 # Third-party clone (AWeirdDev/flights) — installed via setup script
 flights/
 

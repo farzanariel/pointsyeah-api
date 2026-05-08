@@ -46,16 +46,10 @@ AA        AA513           3:05p-11:18p    43,600    $5.60    $658   1.50¢  Qant
 
 ## Setup
 
-Requires **Node 22+** and **Python 3.10+**.
-
-There are two paths depending on your situation. **Most likely you want Path A.**
-
-### Path A — Cloning a working repo (this is the agent path)
-
-If `auth.json` is committed to the repo (the default for this repo's main branch), the headless auth refresh just works on any machine — no interactive sign-in needed:
+Requires **Node 22+** and **Python 3.10+**. First-time setup runs an interactive Google sign-in once on a machine with a desktop; after that, everything is headless.
 
 ```bash
-# 1. Clone (private repo, you'll need access)
+# 1. Clone
 git clone https://github.com/farzanariel/pointsyeah-cli.git
 cd pointsyeah-cli
 
@@ -68,67 +62,74 @@ npx playwright install chromium
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 
-# 4. (VPS / datacenter only) export a residential proxy — see "Running on a VPS"
-# export POINTSYEAH_PROXY='http://user:pass@host:port'
+# 4. One-time Google sign-in — opens a Chromium window
+npm run auth-setup
 
 # 5. Run a search
 npm run search -- JFK LAX 06/09/2026 -c economy --nonstop
 ```
 
-The first search reads `auth.json`, mints a fresh ID token via headless Playwright, and proceeds. Subsequent searches reuse the cached token (`~/.cache/pointsyeah/idToken`) until it expires (~1h), then auto-refresh kicks in again.
-
-### Path B — Bootstrapping from scratch (no `auth.json` yet)
-
-If `auth.json` is missing or stale (Cognito refresh tokens last ~30 days), do an interactive sign-in once on a machine with a desktop:
-
-```bash
-npm install && npx playwright install chromium
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-npm run auth-setup           # opens a Chromium window — sign in
-git add auth.json && git commit -m "auth: refresh auth.json" && git push
-```
-
-After that, agents/VPSes pulling the repo follow Path A.
+`auth-setup` writes a portable `auth.json` (Cognito refresh-token state) to the repo root. **It's gitignored — never commit it.** Subsequent searches reuse a cached short-lived JWT (`~/.cache/pointsyeah/idToken`); when that JWT expires (~1h), the CLI silently mints a new one from `auth.json` via headless Playwright.
 
 > If `auth-setup` just sits there after you sign in, run a flight search on the page — that triggers the auth'd API call the script listens for.
 
-### Running on a VPS / datacenter
+You only need to re-run `auth-setup` when the Cognito refresh token expires (~30 days, but it's silently rotated on each headless refresh — so in practice, only when you've gone a month without using the tool).
 
-Two things behave differently on datacenter IPs:
+### Running the MCP server
 
-- **Pointsyeah API**: works fine — auth-refresh from `auth.json` succeeds with no proxy.
-- **Google Flights (cash side)**: serves a different (unparseable) page to datacenter IPs. You need a residential proxy.
-
-Set one env var and the cash queries route through the proxy automatically:
+The repo also exposes an MCP server so MCP-compatible clients (Claude Code, etc.) can call the same search engine:
 
 ```bash
-export POINTSYEAH_PROXY='http://user:pass@residential-proxy.example:1234'
-npm run search -- JFK LAX 06/09/2026 -c economy
+npm run mcp
 ```
 
-`POINTSYEAH_PROXY` accepts any `http://user:pass@host:port`. It's read by both `auth-refresh.ts` (in case Pointsyeah ever needs it too) and `cash_quote.py`.
+Same auth setup — `auth-setup` first, then start the server.
 
-A pre-baked wrapper that exports the proxy and forwards args is convenient for agents:
+### Running on a VPS / datacenter
+
+A headless VPS can't run the interactive Google sign-in. Workflow: run `auth-setup` on a desktop, sync `auth.json` to the VPS, point the tools at it via env var.
+
+```bash
+# On your laptop:
+npm run auth-setup
+scp auth.json vps-user@vps-host:~/secrets/pointsyeah-auth.json
+
+# On the VPS:
+export POINTSYEAH_AUTH_PATH=~/secrets/pointsyeah-auth.json
+npm run search -- JFK LAX 06/09/2026
+```
+
+`POINTSYEAH_AUTH_PATH` overrides the default `./auth.json` lookup for `auth-setup`, `auth-refresh`, and the MCP server. Storing the file outside the repo means it can't accidentally be re-committed. The VPS handles its own hourly idToken refreshes from there.
+
+Two other things behave differently on datacenter IPs:
+
+- **Pointsyeah API**: works fine — `auth-refresh` from `auth.json` succeeds with no proxy.
+- **Google Flights (cash side)**: serves a different (unparseable) page to datacenter IPs. You need a residential proxy:
+  ```bash
+  export POINTSYEAH_PROXY='http://user:pass@residential-proxy.example:1234'
+  ```
+  Read by both `auth-refresh.ts` and `cash_quote.py`.
+
+A pre-baked wrapper that exports both env vars and forwards args is convenient for agents:
 
 ```bash
 #!/usr/bin/env bash
 # run.sh
+export POINTSYEAH_AUTH_PATH=$HOME/secrets/pointsyeah-auth.json
 export POINTSYEAH_PROXY='http://user:pass@host:port'
 cd "$(dirname "$0")"
 exec npm run --silent search -- "$@"
 ```
 
-Then the agent just calls `./run.sh JFK LAX 06/09/2026 ...`.
-
 ## Authentication internals
 
-- **`auth.json`** (committed): a Playwright [`storageState`](https://playwright.dev/docs/api/class-browsercontext#browser-context-storage-state) JSON containing decrypted cookies for `www.pointsyeah.com` — including the AWS Cognito `refreshToken` (~30 day TTL), `idToken`, `accessToken`, and `LastAuthUser`. This is what makes the refresh portable across machines.
-- **`~/.cache/pointsyeah/idToken`** (local, gitignored, mode 0600): the short-lived (~1h) JWT used to authorize each API call. The CLI re-mints this from `auth.json` whenever it's within 5 min of expiring.
+- **`auth.json`** (gitignored, per-user): a Playwright [`storageState`](https://playwright.dev/docs/api/class-browsercontext#browser-context-storage-state) JSON containing decrypted cookies for `www.pointsyeah.com` — including the AWS Cognito `refreshToken` (~30 day TTL), `idToken`, `accessToken`, and `LastAuthUser`. **This is your credential — anyone with this file is signed in as you.** Path overridable via `POINTSYEAH_AUTH_PATH`.
+- **`~/.cache/pointsyeah/idToken`** (gitignored, mode 0600): the short-lived (~1h) JWT used to authorize each API call. The CLI re-mints this from `auth.json` whenever it's within 5 min of expiring.
 - **`.auth-state/`** (gitignored): Playwright's persistent Chromium profile from `auth-setup`. Used only on the machine that ran `auth-setup`. Not portable — Chromium encrypts cookie values with the host OS keyring (Keychain / Secret Service), so the encrypted blob is unreadable on any other machine. That's why we extract a portable `auth.json` instead.
 
-### Why not just commit a JWT?
+### Why a refresh token instead of just a JWT?
 
-A JWT lasts ~1 hour. A Cognito `refreshToken` (what's in `auth.json`) lasts ~30 days and is silently rotated on each refresh, so the repo stays usable for a month at a time without any human intervention.
+A JWT lasts ~1 hour. A Cognito `refreshToken` (what's in `auth.json`) lasts ~30 days and is silently rotated on each refresh, so once `auth-setup` runs, the tool stays usable for a month at a time with no further interaction.
 
 ### Manual refresh
 
@@ -136,7 +137,7 @@ A JWT lasts ~1 hour. A Cognito `refreshToken` (what's in `auth.json`) lasts ~30 
 npm run auth-refresh   # mints a new idToken from auth.json
 ```
 
-If you ever see `Auth not set up. Run: npm run auth-setup`, the refresh token in `auth.json` has expired or been revoked. Run `npm run auth-setup` interactively, commit the new `auth.json`, push.
+If you ever see `Auth not set up. Run: npm run auth-setup`, the refresh token has expired or been revoked — re-run `auth-setup` (on a machine with a desktop) and, if you're on a VPS, re-sync `auth.json`.
 
 ## Usage
 

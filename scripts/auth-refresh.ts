@@ -9,7 +9,7 @@ import { join } from "node:path";
 
 const TOKEN_DIR = join(homedir(), ".cache", "pointsyeah");
 const TOKEN_PATH = join(TOKEN_DIR, "idToken");
-const STORAGE_STATE = "./auth.json";
+const STORAGE_STATE = process.env.POINTSYEAH_AUTH_PATH?.trim() || "./auth.json";
 const TIMEOUT_MS = 60 * 1000;
 
 const SEARCH_URL =

@@ -10,6 +10,7 @@ import { join } from "node:path";
 const TOKEN_DIR = join(homedir(), ".cache", "pointsyeah");
 const TOKEN_PATH = join(TOKEN_DIR, "idToken");
 const AUTH_STATE_DIR = "./.auth-state";
+const STORAGE_STATE = process.env.POINTSYEAH_AUTH_PATH?.trim() || "./auth.json";
 const TIMEOUT_MS = 5 * 60 * 1000;
 
 async function main(): Promise<void> {
@@ -90,8 +91,8 @@ async function main(): Promise<void> {
   const state = await context.storageState();
   state.cookies = state.cookies.filter((c) => KEEP.includes(c.domain));
   state.origins = state.origins.filter((o) => o.origin.includes("pointsyeah.com"));
-  await writeFile("./auth.json", JSON.stringify(state, null, 2));
-  console.log(`✓ Wrote portable auth state to ./auth.json (${state.cookies.length} cookies)`);
+  await writeFile(STORAGE_STATE, JSON.stringify(state, null, 2));
+  console.log(`✓ Wrote portable auth state to ${STORAGE_STATE} (${state.cookies.length} cookies)`);
 
   await context.close();
 }
