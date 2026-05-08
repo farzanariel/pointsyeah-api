@@ -1,4 +1,4 @@
-# pointsyeah-api
+# pointsyeah-api - the unofficial pointsyeah api
 
 A terminal flight search that prints **points/miles awards side-by-side with cash prices** for the same route — and computes the **cents-per-point (CPP)** redemption value of every award so you can tell the great deals from the bad ones at a glance.
 
