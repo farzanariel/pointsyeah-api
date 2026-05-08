@@ -8,7 +8,8 @@
     "watch": "tsx src/watch.ts",
     "mcp": "tsx src/mcp-server.ts",
     "auth-setup": "tsx scripts/auth-setup.ts",
-    "auth-refresh": "tsx scripts/auth-refresh.ts"
+    "auth-refresh": "tsx scripts/auth-refresh.ts",
+    "sync-auth": "bash scripts/sync-auth.sh"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",

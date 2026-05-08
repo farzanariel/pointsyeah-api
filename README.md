@@ -101,6 +101,14 @@ npm run search -- JFK LAX 06/09/2026
 
 `POINTSYEAH_AUTH_PATH` overrides the default `./auth.json` lookup for `auth-setup`, `auth-refresh`, and the MCP server. Storing the file outside the repo means it can't accidentally be re-committed. The VPS handles its own hourly idToken refreshes from there.
 
+The repo ships an `npm run sync-auth` helper for the laptop side: it reads `POINTSYEAH_SYNC_TARGET` (and optionally `POINTSYEAH_AUTH_PATH`) from `.env` and `scp`s. Add to your gitignored `.env`:
+
+```
+POINTSYEAH_SYNC_TARGET=vps-user@vps-host:~/secrets/pointsyeah-auth.json
+```
+
+Then `npm run sync-auth` after each `auth-setup`.
+
 Two other things behave differently on datacenter IPs:
 
 - **Pointsyeah API**: works fine — `auth-refresh` from `auth.json` succeeds with no proxy.
